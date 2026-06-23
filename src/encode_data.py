@@ -7,11 +7,11 @@ from PIL import Image
 import pickle
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Encode text and images using JZPeterPan/MedVLM-R1")
+    parser = argparse.ArgumentParser(description="Encode text and images using Qwen/Qwen2.5-VL-7B-Instruct")
     parser.add_argument("--metadata_csv", type=str, default="data/bone_disease_mock/metadata.csv")
-    parser.add_argument("--output_notes", type=str, default="data/bone_disease_mock/notes_encoded.p")
-    parser.add_argument("--output_images", type=str, default="data/bone_disease_mock/images_encoded.p")
-    parser.add_argument("--model_id", type=str, default="JZPeterPan/MedVLM-R1")
+    parser.add_argument("--output_notes", type=str, default="data/BTXRD/notes_encoded.p")
+    parser.add_argument("--output_images", type=str, default="data/BTXRD/images_encoded.p")
+    parser.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct")
     parser.add_argument("--use_mock", action="store_true", help="Force use of mock random embeddings")
     return parser.parse_args()
 

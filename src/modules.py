@@ -12,6 +12,34 @@ class ExpModule(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
 
+        # compute weights:
+        if args.task == 'bone_class' and hasattr(args, 'metadata_csv'):
+            import pandas as pd
+            import numpy as np
+            
+            # Load training counts directly from the source CSV file
+            df = pd.read_csv(args.metadata_csv)
+            train_df = df[df['split'] == 'train']
+            
+            # Count occurrences of each class label (0 to 8)
+            counts = train_df['label'].value_counts().to_dict()
+            class_counts = [counts.get(i, 1) for i in range(9)] # Default to 1 to prevent division by zero
+            
+            # Calculate inverse frequency weights
+            total_samples = sum(class_counts)
+            class_weights = [total_samples / (9 * count) for count in class_counts]
+            
+            # Normalize weights so the minimum weight is 1.0 (prevents over-damping majority classes)
+            min_weight = min(class_weights)
+            class_weights = [w / min_weight for w in class_weights]
+            
+            # Save it to arguments so layers.py can read it
+            args.class_weights = class_weights
+        else:
+            args.class_weights = None
+
+        ###
+
         self.save_hyperparameters(args)
 
         self.model = init_model(self.hparams)
@@ -27,16 +55,40 @@ class ExpModule(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.hparams.wd)
         return optimizer
 
-    def forward(self, input, target, mask):
+    # def forward(self, input, target, mask):
 
-        if isinstance(input, tuple):
-            x1,x2 = input
-            m1,m2 = mask
-            logits, loss = self.model(x1,x2, target, m1,m2)
+    #     if isinstance(input, tuple):
+    #         x1,x2 = input
+    #         m1,m2 = mask
+    #         logits, loss = self.model(x1,x2, target, m1,m2)
+    #     else:
+    #         logits, loss = self.model(input, target, mask)
+
+    #     return logits, loss 
+    def forward(self, input, target, mask):
+        # Check if input arrived packed as a list or tuple [images, notes]
+        if isinstance(input, (tuple, list)) and len(input) == 2:
+            x_ts, x_txt = input[0], input[1]
+            
+            # Unpack masks if they arrived as a pair (masks_img, masks_txt)
+            if isinstance(mask, (tuple, list)) and len(mask) == 2:
+                ts_attn_mask, txt_attn_mask = mask[0], mask[1]
+            else:
+                ts_attn_mask, txt_attn_mask = None, None
+                
+            # Pass them cleanly using explicit keyword arguments
+            logits, loss = self.model(
+                x_ts=x_ts, 
+                x_txt=x_txt, 
+                labels=target, 
+                ts_attn_mask=ts_attn_mask, 
+                txt_attn_mask=txt_attn_mask
+            )
         else:
+            # Fallback path for other tasks
             logits, loss = self.model(input, target, mask)
 
-        return logits, loss 
+        return logits, loss
 
     def step(self, batch, train_stage=False):
         input, target, mask, stay = batch 
@@ -89,7 +141,13 @@ class ExpModule(pl.LightningModule):
         y = torch.cat(all_y).cpu()
         
         scores, line = self.scorer.eval_all_scores(logits, y)
-        score = scores[self.scorer.score_main]
+        # score = scores[self.scorer.score_main]
+        if self.hparams.task == 'bone_class':
+            # Check your printout headers: if it prints as 'MacroF1', use 'MacroF1'. 
+            # If it throws a KeyError, change this string to 'f1_macro' or 'macrof1'.
+            score = scores.get('MacroF1', scores.get('f1_macro', scores.get('macrof1')))
+        else:
+            score = scores[self.scorer.score_main]
         self.log('valid_score', score)
 
         if not self.hparams.silent:

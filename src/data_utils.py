@@ -123,16 +123,51 @@ class ExpDataModule(pl.LightningDataModule):
                 self.test_dataset = BimodalDataset(self.target, self.test_df, [self.data_txt, self.data_ts[-1]], silent=self.silent )
 
 
+    # def train_dataloader(self, bsize=None):
+    #     batch_size = bsize if bsize else self.batch_size
+    #     return DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True, collate_fn=self.my_collate_fn, drop_last=True)
+
     def train_dataloader(self, bsize=None):
         batch_size = bsize if bsize else self.batch_size
-        return DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True, collate_fn=self.my_collate_fn, drop_last=True)
+        
+        if self.task == 'bone_class':
+            from torch.utils.data import WeightedRandomSampler
+            
+            train_labels = [sample[1] for sample in self.train_dataset.data]
+            class_counts = np.bincount(train_labels, minlength=8)
+            class_counts = np.where(class_counts == 0, 1, class_counts) 
+            
+            # --- SMOOTHED SAMPLING WEIGHTS ---
+            # class_weights = 1.0 / np.sqrt(class_counts) 
+            class_weights = 1.0 / (class_counts ** 0.4)
+            sample_weights = [class_weights[label] for label in train_labels]
+            
+            sampler = WeightedRandomSampler(
+                weights=sample_weights,
+                num_samples=len(sample_weights),
+                replacement=True
+            )
+            
+            return DataLoader(
+                self.train_dataset, 
+                batch_size=batch_size, 
+                sampler=sampler,
+                collate_fn=self.my_collate_fn, 
+                drop_last=True,
+                num_workers=4,          # Set to 4 or 8 to enable asynchronous data fetching
+                pin_memory=True        # Speeds up tensor transfers to the GPU
+            )
+
+        return DataLoader(
+            self.train_dataset, batch_size=batch_size, shuffle=True, collate_fn=self.my_collate_fn, drop_last=True
+        )
+
     def val_dataloader(self, bsize=None):
         batch_size = bsize if bsize else self.batch_size
         return DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False, collate_fn=self.my_collate_fn)
     def test_dataloader(self, bsize=None):
         batch_size = bsize if bsize else self.batch_size
         return DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False, collate_fn=self.my_collate_fn)
-
 
 
 def _task2target(task):
@@ -353,24 +388,70 @@ def get_X_mean(lvl2_train):
     return X_mean
 
 
-def collate_both_bone(batch):
-    # Each item in batch is: [(x_img, x_txt), label, hadm_id, 1]
-    # x_img: np.array of shape [1536] or None (if missing)
-    # x_txt: list/vector of shape [1536]
+# def collate_both_bone(batch):
+#     # Each item in batch is: [(x_img, x_txt), label, hadm_id, 1]
+#     # x_img: np.array of shape [1536] or None (if missing)
+#     # x_txt: list/vector of shape [1536]
     
+#     images = []
+#     masks_img = []
+#     for b in batch:
+#         img_feat = b[0][0]
+#         if img_feat is not None and not (isinstance(img_feat, float) and np.isnan(img_feat).all()):
+#             images.append(torch.tensor(img_feat, dtype=torch.float32).unsqueeze(0)) # [1, 1536]
+#             masks_img.append(torch.ones(1).long())
+#         else:
+#             images.append(torch.zeros(1, 1536, dtype=torch.float32))
+#             masks_img.append(torch.zeros(1).long())
+            
+#     images = torch.stack(images) # [batch_size, 1, 1536]
+#     masks_img = torch.stack(masks_img) # [batch_size, 1]
+    
+#     notes = []
+#     masks_txt = []
+#     for b in batch:
+#         txt_feat = b[0][1]
+#         if txt_feat is not None:
+#             if isinstance(txt_feat, list) and len(txt_feat) > 0:
+#                 if isinstance(txt_feat[0], (list, np.ndarray)):
+#                     notes.append(torch.tensor(txt_feat[0], dtype=torch.float32).unsqueeze(0))
+#                 else:
+#                     notes.append(torch.tensor(txt_feat, dtype=torch.float32).unsqueeze(0))
+#                 masks_txt.append(torch.ones(1).long())
+#             elif isinstance(txt_feat, np.ndarray):
+#                 notes.append(torch.tensor(txt_feat, dtype=torch.float32).unsqueeze(0))
+#                 masks_txt.append(torch.ones(1).long())
+#             else:
+#                 notes.append(torch.tensor(txt_feat, dtype=torch.float32).unsqueeze(0))
+#                 masks_txt.append(torch.ones(1).long())
+#         else:
+#             notes.append(torch.zeros(1, 1536, dtype=torch.float32))
+#             masks_txt.append(torch.zeros(1).long())
+            
+#     notes = torch.stack(notes) # [batch_size, 1, 1536]
+#     masks_txt = torch.stack(masks_txt) # [batch_size, 1]
+    
+#     labels = torch.tensor([b[1] for b in batch], dtype=torch.long)
+#     hadms = [b[2] for b in batch]
+    
+#     return (images, notes), labels, (masks_img, masks_txt), hadms
+
+def collate_both_bone(batch):
     images = []
     masks_img = []
     for b in batch:
         img_feat = b[0][0]
         if img_feat is not None and not (isinstance(img_feat, float) and np.isnan(img_feat).all()):
-            images.append(torch.tensor(img_feat, dtype=torch.float32).unsqueeze(0)) # [1, 1536]
-            masks_img.append(torch.ones(1).long())
+            images.append(torch.tensor(img_feat, dtype=torch.float32).view(1, -1)) # [1, 1536]
+            masks_img.append(torch.ones(1, 1, dtype=torch.long))                  # [1, 1] -> Keep it 2D
         else:
             images.append(torch.zeros(1, 1536, dtype=torch.float32))
-            masks_img.append(torch.zeros(1).long())
+            masks_img.append(torch.zeros(1, 1, dtype=torch.long))
             
-    images = torch.stack(images) # [batch_size, 1, 1536]
-    masks_img = torch.stack(masks_img) # [batch_size, 1]
+    images = torch.stack(images, dim=0).squeeze(1) # [batch_size, 1, 1536]
+    
+    # CRITICAL FIX: Use torch.cat along dim=0 instead of stack+squeeze to guarantee [batch_size, 1]
+    masks_img = torch.cat(masks_img, dim=0)        # Shape: [batch_size, 1]
     
     notes = []
     masks_txt = []
@@ -378,23 +459,23 @@ def collate_both_bone(batch):
         txt_feat = b[0][1]
         if txt_feat is not None:
             if isinstance(txt_feat, list) and len(txt_feat) > 0:
-                if isinstance(txt_feat[0], (list, np.ndarray)):
-                    notes.append(torch.tensor(txt_feat[0], dtype=torch.float32).unsqueeze(0))
-                else:
-                    notes.append(torch.tensor(txt_feat, dtype=torch.float32).unsqueeze(0))
-                masks_txt.append(torch.ones(1).long())
+                feat_arr = txt_feat[0] if isinstance(txt_feat[0], (list, np.ndarray)) else txt_feat
+                notes.append(torch.tensor(feat_arr, dtype=torch.float32).view(1, -1))
+                masks_txt.append(torch.ones(1, 1, dtype=torch.long))
             elif isinstance(txt_feat, np.ndarray):
-                notes.append(torch.tensor(txt_feat, dtype=torch.float32).unsqueeze(0))
-                masks_txt.append(torch.ones(1).long())
+                notes.append(torch.tensor(txt_feat, dtype=torch.float32).view(1, -1))
+                masks_txt.append(torch.ones(1, 1, dtype=torch.long))
             else:
-                notes.append(torch.tensor(txt_feat, dtype=torch.float32).unsqueeze(0))
-                masks_txt.append(torch.ones(1).long())
+                notes.append(torch.tensor(txt_feat, dtype=torch.float32).view(1, -1))
+                masks_txt.append(torch.ones(1, 1, dtype=torch.long))
         else:
             notes.append(torch.zeros(1, 1536, dtype=torch.float32))
-            masks_txt.append(torch.zeros(1).long())
+            masks_txt.append(torch.zeros(1, 1, dtype=torch.long))
             
-    notes = torch.stack(notes) # [batch_size, 1, 1536]
-    masks_txt = torch.stack(masks_txt) # [batch_size, 1]
+    notes = torch.stack(notes, dim=0).squeeze(1)   # [batch_size, 1, 1536]
+    
+    # CRITICAL FIX: Match the 2D configuration here too
+    masks_txt = torch.cat(masks_txt, dim=0)        # Shape: [batch_size, 1]
     
     labels = torch.tensor([b[1] for b in batch], dtype=torch.long)
     hadms = [b[2] for b in batch]

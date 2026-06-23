@@ -402,6 +402,12 @@ class FusionModel(nn.Module):
             nn.Linear(ts_size+txt_size, Y)
         )
 
+        if hasattr(config, 'class_weights') and config.class_weights is not None:
+            weights_tensor = torch.tensor(config.class_weights, dtype=torch.float32)
+            self.criterion = nn.CrossEntropyLoss(weight=weights_tensor)
+        else:
+            self.criterion = nn.CrossEntropyLoss()
+
 
     def _init_cls(self, config):
         # cls tokens 
@@ -454,7 +460,8 @@ class FusionModel(nn.Module):
 
         logits = self.output_layer(final_hidden)
 
-        loss = nn.CrossEntropyLoss()(logits, target)
+        # loss = nn.CrossEntropyLoss()(logits, target)
+        loss = self.criterion(logits, target)
 
         return logits, loss
 
@@ -578,7 +585,8 @@ class ContrastFusionModel(FusionModel):
 
         logits = self.output_layer(final_hidden)
 
-        loss_sup = nn.CrossEntropyLoss()(logits, target)
+        # loss_sup = nn.CrossEntropyLoss()(logits, target)
+        loss_sup = self.criterion(logits, target)
 
         # final loss
         loss = self.alpha * loss_contrastive + (1 - self.alpha) * loss_sup
@@ -636,8 +644,18 @@ class ExpModel(nn.Module):
         if self.task == 'bone_class':
             img_feat_dim = getattr(config, 'img_feat_dim', 1536)
             txt_feat_dim = getattr(config, 'txt_feat_dim', 1536)
-            self.img_proj = nn.Linear(img_feat_dim, config.ts_size)
-            self.txt_proj = nn.Linear(txt_feat_dim, config.txt_size)
+            # self.img_proj = nn.Linear(img_feat_dim, config.ts_size)
+            # self.txt_proj = nn.Linear(txt_feat_dim, config.txt_size)
+            self.img_proj = nn.Sequential(
+                nn.Linear(img_feat_dim, config.ts_size),
+                nn.LayerNorm(config.ts_size),
+                nn.Dropout(config.dropout)
+            )
+            self.txt_proj = nn.Sequential(
+                nn.Linear(txt_feat_dim, config.txt_size),
+                nn.LayerNorm(config.txt_size),
+                nn.Dropout(config.dropout)
+            )
         else:
             self.grud = GRUD(104, config.ts_size, config.dropout_grud)
             self.lstm = nn.LSTM(768, config.txt_size, batch_first=True)
@@ -647,6 +665,11 @@ class ExpModel(nn.Module):
         if self.task == 'bone_class':
             # x_ts is the image embedding, shape [batch_size, 1, img_feat_dim]
             # x_txt is the text embedding, shape [batch_size, 1, txt_feat_dim]
+            if x_ts.dim() == 2:
+                x_ts = x_ts.unsqueeze(1)
+            if x_txt.dim() == 2:
+                x_txt = x_txt.unsqueeze(1)
+
             ts_input = self.img_proj(x_ts.float())
             txt_input = self.txt_proj(x_txt.float())
         else:
@@ -683,7 +706,7 @@ def init_model(config):
     elif task == 'apr_drg':
         Y = 849 
     elif task == 'bone_class':
-        Y = 3 # 3 classes for bone disease classification
+        Y = 9 # 9 classes for bone disease classification
     else:
         Y = 2 
 
