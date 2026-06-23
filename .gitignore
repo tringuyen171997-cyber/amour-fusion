@@ -26,7 +26,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-data/
+data/bone
+data/bone_disease_mock
+data/BTXRD
+data/OrthoFrac-XR
 output/
 # PyInstaller
 #  Usually these files are written by a python script from a template
