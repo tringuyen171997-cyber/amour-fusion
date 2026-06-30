@@ -32,14 +32,16 @@ def main():
     if not args.use_mock:
         try:
             print(f"Attempting to load foundation model: {args.model_id} on {device}...")
-            from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+            from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
             processor = AutoProcessor.from_pretrained(args.model_id)
-            model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 args.model_id,
-                torch_dtype=torch.float32,  # Use float32 for CPU compatibility
-                device_map=None
+                torch_dtype=torch.float16,
+                device_map="auto",
+                attn_implementation="flash_attention_2"
             )
-            model.to(device)
+            print(model)
+            # model.to(device)
             model.eval()
             print("Model loaded successfully.")
         except Exception as e:
@@ -91,11 +93,30 @@ def main():
                 if model is not None and processor is not None:
                     try:
                         img = Image.open(img_abs_path).convert("RGB")
-                        inputs = processor(images=img, return_tensors="pt")
-                        inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-                        with torch.no_grad():
-                            visual_outputs = model.visual(inputs["pixel_values"], inputs["image_grid_thw"])
-                            img_emb = visual_outputs.mean(dim=0).cpu().numpy()
+                        # print(f"Image size: {img.size}")
+                        # Qwen2.5-VL expects a prompt for image inputs
+                        conversation = [
+                            {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": "Describe this image."}]},
+                        ]
+                        text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+                        
+                        inputs = processor(
+                            text=[text_prompt], 
+                            images=[img], 
+                            videos=None, 
+                            padding=True, 
+                            return_tensors="pt",
+                            min_pixels=256*256,      
+                            max_pixels=2200*2500,   
+                        ).to(model.device) # Use model.device instead of hardcoded "cuda"
+
+                        with torch.inference_mode():
+                            # Use the model as a whole; it returns hidden states
+                            outputs = model(**inputs, output_hidden_states=True)
+                            img_emb = outputs.hidden_states[-1].mean(dim=1).squeeze().cpu().numpy()
+                        del outputs, inputs # Explicitly free references
+                        torch.cuda.empty_cache()
+                            
                     except Exception as ex:
                         print(f"Error encoding image {img_abs_path}: {ex}. Using random mockup.")
                         img_emb = np.random.randn(1536)
@@ -109,7 +130,7 @@ def main():
             "vector": img_emb
         })
         
-        if (idx + 1) % 5 == 0:
+        if (idx + 1) % 50 == 0:
             print(f"Encoded {idx + 1}/{len(df)} samples...")
             
     # Save encoded pickle dataframes

@@ -642,10 +642,11 @@ class ExpModel(nn.Module):
 
         self.task = getattr(config, 'task', 'mort_hosp')
         if self.task == 'bone_class':
-            img_feat_dim = getattr(config, 'img_feat_dim', 1536)
-            txt_feat_dim = getattr(config, 'txt_feat_dim', 1536)
+            img_feat_dim = getattr(config, 'img_feat_dim', 3584) 
+            txt_feat_dim = getattr(config, 'txt_feat_dim', 3584)
             # self.img_proj = nn.Linear(img_feat_dim, config.ts_size)
             # self.txt_proj = nn.Linear(txt_feat_dim, config.txt_size)
+            # print("DEBUG: Using img_feat_dim =", img_feat_dim)
             self.img_proj = nn.Sequential(
                 nn.Linear(img_feat_dim, config.ts_size),
                 nn.LayerNorm(config.ts_size),
@@ -661,10 +662,10 @@ class ExpModel(nn.Module):
             self.lstm = nn.LSTM(768, config.txt_size, batch_first=True)
 
     def forward(self, x_ts, x_txt, labels, ts_attn_mask=None, txt_attn_mask=None):
-        
         if self.task == 'bone_class':
             # x_ts is the image embedding, shape [batch_size, 1, img_feat_dim]
             # x_txt is the text embedding, shape [batch_size, 1, txt_feat_dim]
+            # print(f"DEBUG: Input x_ts shape: {x_ts.shape}")
             if x_ts.dim() == 2:
                 x_ts = x_ts.unsqueeze(1)
             if x_txt.dim() == 2:

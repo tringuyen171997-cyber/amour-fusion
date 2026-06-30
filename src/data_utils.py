@@ -21,6 +21,10 @@ class ExpDataModule(pl.LightningDataModule):
         self.silent = args.silent
         self.trim_cohort = args.trim_cohort
 
+        self.use_weighted_sampler = getattr(args, 'use_weighted_sampler', False)
+        self.sampler_smoothing = getattr(args, 'sampler_smoothing', 0.4)
+        self.img_dropout_prob = getattr(args, 'img_dropout_prob', 0.0)
+
         # self.note_encode_dir = args.note_encode_dir
         self.note_encode_name = args.note_encode_name
 
@@ -85,9 +89,14 @@ class ExpDataModule(pl.LightningDataModule):
 
         if self.task == 'bone_class':
             target_str = 'trim_missing' if self.trim_cohort else self.target
+            # cohort_df_list is always [train_df] or [train_df, val_df, test_df] in that order
+            is_train_flags = [True] + [False] * (len(cohort_df_list) - 1) if len(cohort_df_list) > 1 else [False]
             dataset_list = [
-                BoneDataset(target_str, cohort_df, self.data_txt, self.data_img, self.silent)
-                for cohort_df in cohort_df_list
+                BoneDataset(
+                    target_str, cohort_df, self.data_txt, self.data_img, self.silent,
+                    img_dropout_prob=self.img_dropout_prob, is_train=is_train,
+                )
+                for cohort_df, is_train in zip(cohort_df_list, is_train_flags)
             ]
         elif self.modality == 'struct':
             dataset_list = [
@@ -130,17 +139,26 @@ class ExpDataModule(pl.LightningDataModule):
     def train_dataloader(self, bsize=None):
         batch_size = bsize if bsize else self.batch_size
         
-        if self.task == 'bone_class':
+        if self.task == 'bone_class' and getattr(self, 'use_weighted_sampler', False):
             from torch.utils.data import WeightedRandomSampler
             
             train_labels = [sample[1] for sample in self.train_dataset.data]
-            class_counts = np.bincount(train_labels, minlength=8)
-            class_counts = np.where(class_counts == 0, 1, class_counts) 
-            
+            num_classes = len(set(train_labels))
+            # bincount's length is max(label)+1 already; minlength is just a floor,
+            # but make it explicit so this is correct even if a class is entirely
+            # absent from a particular run (e.g. debug subsampling).
+            class_counts = np.bincount(train_labels, minlength=max(train_labels) + 1)
+            class_counts = np.where(class_counts == 0, 1, class_counts)
+
             # --- SMOOTHED SAMPLING WEIGHTS ---
-            # class_weights = 1.0 / np.sqrt(class_counts) 
-            class_weights = 1.0 / (class_counts ** 0.4)
+            # exponent of 1.0 = full inverse frequency (aggressive oversampling of rare classes)
+            # exponent of 0.0 = uniform sampling (no rebalancing)
+            class_weights = 1.0 / (class_counts ** self.sampler_smoothing)
             sample_weights = [class_weights[label] for label in train_labels]
+
+            print(f"[use_weighted_sampler] class counts: {class_counts.tolist()}")
+            print(f"[use_weighted_sampler] sampler smoothing={self.sampler_smoothing}, "
+                  f"per-class weight: {[round(w,3) for w in class_weights]}")
             
             sampler = WeightedRandomSampler(
                 weights=sample_weights,
@@ -168,6 +186,19 @@ class ExpDataModule(pl.LightningDataModule):
     def test_dataloader(self, bsize=None):
         batch_size = bsize if bsize else self.batch_size
         return DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False, collate_fn=self.my_collate_fn)
+
+    def test_dataloader_missing_image(self, bsize=None):
+        """Eval-only dataloader that forces every image to be treated as missing,
+        to measure how well the model degrades to text-only inference.
+        Only valid for task == 'bone_class'."""
+        assert self.task == 'bone_class', "missing-image eval only implemented for bone_class"
+        batch_size = bsize if bsize else self.batch_size
+        target_str = 'trim_missing' if self.trim_cohort else self.target
+        forced_missing_dataset = BoneDataset(
+            target_str, self.test_df, self.data_txt, self.data_img, self.silent,
+            img_dropout_prob=1.0, is_train=True,  # is_train=True just to make the dropout prob active; it still only touches img
+        )
+        return DataLoader(forced_missing_dataset, batch_size=batch_size, shuffle=False, collate_fn=self.my_collate_fn)
 
 
 def _task2target(task):
@@ -439,20 +470,27 @@ def get_X_mean(lvl2_train):
 def collate_both_bone(batch):
     images = []
     masks_img = []
+    EMBED_DIM = 3584
     for b in batch:
         img_feat = b[0][0]
         if img_feat is not None and not (isinstance(img_feat, float) and np.isnan(img_feat).all()):
             images.append(torch.tensor(img_feat, dtype=torch.float32).view(1, -1)) # [1, 1536]
             masks_img.append(torch.ones(1, 1, dtype=torch.long))                  # [1, 1] -> Keep it 2D
         else:
-            images.append(torch.zeros(1, 1536, dtype=torch.float32))
+            images.append(torch.zeros(1, EMBED_DIM, dtype=torch.float32))
             masks_img.append(torch.zeros(1, 1, dtype=torch.long))
             
     images = torch.stack(images, dim=0).squeeze(1) # [batch_size, 1, 1536]
     
     # CRITICAL FIX: Use torch.cat along dim=0 instead of stack+squeeze to guarantee [batch_size, 1]
     masks_img = torch.cat(masks_img, dim=0)        # Shape: [batch_size, 1]
-    
+    ### debug only
+    if masks_img[0].item() == 0:
+        print("CONFIRMED: Mask is 0, model is ignoring image.")
+    else:
+        print("WARNING: Image is active!")
+
+    ###
     notes = []
     masks_txt = []
     for b in batch:
@@ -469,7 +507,7 @@ def collate_both_bone(batch):
                 notes.append(torch.tensor(txt_feat, dtype=torch.float32).view(1, -1))
                 masks_txt.append(torch.ones(1, 1, dtype=torch.long))
         else:
-            notes.append(torch.zeros(1, 1536, dtype=torch.float32))
+            notes.append(torch.zeros(1, EMBED_DIM, dtype=torch.float32))
             masks_txt.append(torch.zeros(1, 1, dtype=torch.long))
             
     notes = torch.stack(notes, dim=0).squeeze(1)   # [batch_size, 1, 1536]
@@ -484,10 +522,21 @@ def collate_both_bone(batch):
 
 
 class BoneDataset(Dataset):
-    def __init__(self, target, cohort_df, data_txt, data_img, silent=False):
+    def __init__(self, target, cohort_df, data_txt, data_img, silent=False,
+                 img_dropout_prob=0.0, is_train=False):
         super().__init__()
         self.data = []
-        
+
+        # img_dropout_prob: probability of simulating a MISSING image at __getitem__ time,
+        # even when a real image embedding is available. Only meaningful when is_train=True
+        # (we don't want eval metrics randomly fluctuating run to run on the standard val/test loop).
+        # This is the modality-dropout strategy used to train robustness to missing modalities:
+        # text is always kept (required), image is randomly dropped so the model learns to use
+        # the masked-attention fallback path (mask=0 -> CLS-only / text-only inference) instead of
+        # only ever seeing fully-paired inputs at train time.
+        self.img_dropout_prob = img_dropout_prob if is_train else 0.0
+        self.is_train = is_train
+
         for _, row in cohort_df.iterrows():
             hadm = row['HADM_ID']
             label = row['label'] # target
@@ -517,7 +566,14 @@ class BoneDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx]
+        (x_img, x_txt), label, hadm, window = self.data[idx]
+
+        if self.img_dropout_prob > 0.0 and x_img is not None and np.random.rand() < self.img_dropout_prob:
+            # Simulate a missing image for this sample on this access.
+            # Original self.data is left untouched, so this re-randomizes every epoch.
+            x_img = None
+
+        return [(x_img, x_txt), label, hadm, window]
 
 
 

@@ -96,6 +96,15 @@ def main_run(args, dm=None, seed=None):
 
     output = trainer.predict(model, dataloaders=dm.test_dataloader(), ckpt_path='best')
     main_score, scores = evaluate_predict_output(output, args.task)
+
+    # Optional: measure robustness to a fully-missing image modality at eval time.
+    if getattr(args, 'eval_missing_image', False) and args.task == 'bone_class':
+        logging.info('Running additional eval pass with ALL images forced missing (text-only)...')
+        output_missing_img = trainer.predict(
+            model, dataloaders=dm.test_dataloader_missing_image(), ckpt_path='best'
+        )
+        missing_img_score, missing_img_scores = evaluate_predict_output(output_missing_img, args.task)
+        logging.info(f'[missing-image eval] main_score={missing_img_score:.4f}  scores={missing_img_scores}')
     # -------------------------------------------------------------
     try:
         all_hadms = []

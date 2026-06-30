@@ -20,8 +20,25 @@ def add_task_args(parent_parser):
     parser.add_argument("--metadata_csv", type=str, default="data/bone_disease_mock/metadata.csv")
     parser.add_argument("--img_encode_path", type=str, default="data/bone_disease_mock/images_encoded.p")
     parser.add_argument("--txt_encode_path", type=str, default="data/bone_disease_mock/notes_encoded.p")
-    parser.add_argument("--img_feat_dim", type=int, default=1536)
-    parser.add_argument("--txt_feat_dim", type=int, default=1536)
+    parser.add_argument("--img_feat_dim", type=int, default=3584)
+    parser.add_argument("--txt_feat_dim", type=int, default=3584)
+
+    # Imbalance-handling toggles for bone_class. Default both OFF so you can
+    # A/B test: sampler alone, loss-weight alone, both, or neither.
+    parser.add_argument('--use_weighted_loss', action="store_const", const=True, default=False,
+                         help='Apply inverse-frequency class weights to CrossEntropyLoss (bone_class task only)')
+    parser.add_argument('--use_weighted_sampler', action="store_const", const=True, default=False,
+                         help='Use a WeightedRandomSampler to oversample minority classes during training (bone_class task only)')
+    parser.add_argument('--sampler_smoothing', type=float, default=0.4,
+                         help='Exponent applied to inverse class counts for the sampler (1.0=full inverse-freq, 0=uniform)')
+
+    # Missing-modality training (image optional, clinical notes always required).
+    # Randomly masks out the image embedding during TRAINING ONLY so the model learns to
+    # fall back on text-only inference via the existing attention-masking pathway in layers.py.
+    parser.add_argument('--img_dropout_prob', type=float, default=0.0,
+                         help='Probability of simulating a missing image at train time (0=off, e.g. 0.3 = drop image on 30%% of train samples each epoch)')
+    parser.add_argument('--eval_missing_image', action="store_const", const=True, default=False,
+                         help='If set, also run an extra eval pass on val/test with ALL images forced missing, to measure text-only robustness')
 
 
     return parent_parser

@@ -12,27 +12,34 @@ class ExpModule(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
 
-        # compute weights:
-        if args.task == 'bone_class' and hasattr(args, 'metadata_csv'):
+        # compute weights (only if explicitly requested via --use_weighted_loss):
+        if args.task == 'bone_class' and getattr(args, 'use_weighted_loss', False) and hasattr(args, 'metadata_csv'):
             import pandas as pd
             import numpy as np
-            
-            # Load training counts directly from the source CSV file
+
+            # Load training counts directly from the source CSV file.
+            # Use the FULL set of class ids actually present anywhere in the csv
+            # (not a hardcoded range(9)) so this stays correct if the label set changes.
             df = pd.read_csv(args.metadata_csv)
             train_df = df[df['split'] == 'train']
-            
-            # Count occurrences of each class label (0 to 8)
+            all_classes = sorted(df['label'].unique().tolist())
+            num_classes = len(all_classes)
+
+            # Count occurrences of each class label in TRAIN split only
             counts = train_df['label'].value_counts().to_dict()
-            class_counts = [counts.get(i, 1) for i in range(9)] # Default to 1 to prevent division by zero
-            
-            # Calculate inverse frequency weights
+            class_counts = [counts.get(c, 1) for c in all_classes]  # default to 1 to avoid div-by-zero
+
+            # Inverse frequency weights
             total_samples = sum(class_counts)
-            class_weights = [total_samples / (9 * count) for count in class_counts]
-            
-            # Normalize weights so the minimum weight is 1.0 (prevents over-damping majority classes)
+            class_weights = [total_samples / (num_classes * count) for count in class_counts]
+
+            # Normalize so the minimum weight is 1.0 (avoid over-damping the majority class)
             min_weight = min(class_weights)
             class_weights = [w / min_weight for w in class_weights]
-            
+
+            print(f"[use_weighted_loss] class counts (train): {dict(zip(all_classes, class_counts))}")
+            print(f"[use_weighted_loss] class weights: {[round(w,3) for w in class_weights]}")
+
             # Save it to arguments so layers.py can read it
             args.class_weights = class_weights
         else:
